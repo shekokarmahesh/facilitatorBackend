@@ -2,9 +2,6 @@ import psycopg2
 from psycopg2.extras import DictCursor
 import os
 from dotenv import load_dotenv
-from datetime import datetime
-from typing import Optional
-from bcrypt import hashpw, gensalt
 import logging
 
 load_dotenv()
@@ -27,7 +24,7 @@ class DatabaseManager:
         self.cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
-            tenant_id UUID NOT NULL,
+            tenant_id VARCHAR(255) NOT NULL,
             email VARCHAR(255) UNIQUE NOT NULL,
             password VARCHAR(255) NOT NULL,
             is_active BOOLEAN DEFAULT TRUE,
@@ -39,13 +36,14 @@ class DatabaseManager:
             id SERIAL PRIMARY KEY,
             email VARCHAR(255) NOT NULL,
             otp INTEGER NOT NULL,
+            password VARCHAR(255),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS facilitator_profiles (
             id SERIAL PRIMARY KEY,
-            tenant_id UUID NOT NULL,
-            user_id UUID NOT NULL,
+            tenant_id VARCHAR(255) NOT NULL,
+            user_id INTEGER NOT NULL,
             basic_info JSONB,
             professional_details JSONB,
             bio_about JSONB,
@@ -58,8 +56,8 @@ class DatabaseManager:
 
         CREATE TABLE IF NOT EXISTS offerings (
             id SERIAL PRIMARY KEY,
-            tenant_id UUID NOT NULL,
-            user_id UUID NOT NULL,
+            tenant_id VARCHAR(255) NOT NULL,
+            user_id INTEGER NOT NULL,
             basic_info JSONB,
             details JSONB,
             price_schedule JSONB,
@@ -78,9 +76,8 @@ class FacilitatorRepository:
     def __init__(self, db_manager: DatabaseManager):
         self.db_manager = db_manager
 
-    def create_user(self, tenant_id: str, email: str, password: str) -> Optional[int]:
+    def create_user(self, tenant_id: str, email: str, password: str):
         """Create a new user"""
-        hashed_password = hashpw(password.encode('utf-8'), gensalt()).decode('utf-8')
         try:
             self.db_manager.cursor.execute(
                 """
@@ -88,7 +85,7 @@ class FacilitatorRepository:
                 VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 RETURNING id;
                 """,
-                (tenant_id, email, hashed_password, True)
+                (tenant_id, email, password, True)
             )
             user_id = self.db_manager.cursor.fetchone()[0]
             self.db_manager.connection.commit()
@@ -123,7 +120,7 @@ class FacilitatorRepository:
         except psycopg2.Error as e:
             print(f"Error updating facilitator profile: {e}")
 
-    def get_facilitator_profile(self, tenant_id: str, user_id: int) -> Optional[dict]:
+    def get_facilitator_profile(self, tenant_id: str, user_id: int):
         """Get complete facilitator profile"""
         try:
             self.db_manager.cursor.execute(
@@ -139,7 +136,7 @@ class FacilitatorRepository:
             print(f"Error fetching facilitator profile: {e}")
             return None
 
-    def get_facilitator_offerings(self, tenant_id: str, user_id: int) -> list:
+    def get_facilitator_offerings(self, tenant_id: str, user_id: int):
         """Get all offerings for a facilitator"""
         try:
             self.db_manager.cursor.execute(
@@ -155,7 +152,7 @@ class FacilitatorRepository:
             print(f"Error fetching facilitator offerings: {e}")
             return []
 
-    def search_facilitators(self, tenant_id: str, filters: dict = None, page: int = 1, limit: int = 10) -> list:
+    def search_facilitators(self, tenant_id: str, filters: dict = None, page: int = 1, limit: int = 10):
         """Search facilitators with filters and pagination"""
         query = "SELECT * FROM facilitator_profiles WHERE tenant_id = %s"
         params = [tenant_id]
@@ -181,26 +178,3 @@ if __name__ == "__main__":
     db_manager = DatabaseManager()
     db_manager._setup_tables()
     db_manager.close_connection()
-
-    facilitator_repo = FacilitatorRepository(db_manager)
-    
-    # Example usage
-    tenant_id = "675b1234567890abcdef1234"  # Your tenant ID
-    user_id = facilitator_repo.create_user(tenant_id, "john@example.com", "password123")
-    
-    # Update profile
-    profile_data = {
-        "basic_info": {
-            "first_name": "John",
-            "last_name": "Doe",
-            "phone_no": "+1234567890",
-            "location": "New York"
-        },
-        "professional_details": {
-            "languages": ["English", "Spanish"],
-            "teaching_styles": ["Interactive", "Hands-on"],
-            "specializations": ["Web Development", "Data Science"]
-        }
-    }
-    
-    facilitator_repo.update_facilitator_profile(tenant_id, user_id, profile_data)
