@@ -7,13 +7,13 @@ wheels/
 *.egg-info
 .env
 
+# Firebase credentials
+firebase-service-account.json
+*-service-account.json
+
 # Virtual environments
 .venv
 .env
-
-# Firebase credentials
-firebase-service-account.json
-*firebase-adminsdk*.json
 
 # Logs
 *.log

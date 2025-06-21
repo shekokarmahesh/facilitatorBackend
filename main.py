@@ -2,6 +2,10 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import os
 from datetime import timedelta
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 from routes.phone_auth_routes import auth_bp
 from routes.facilitator_routes import facilitator_bp

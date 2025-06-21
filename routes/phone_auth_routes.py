@@ -3,6 +3,7 @@ from models.database import DatabaseManager, FacilitatorRepository
 import random
 import re
 from datetime import datetime
+from helpers.firebase_sms import firebase_sms_service
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -22,12 +23,15 @@ def generate_otp():
 
 def send_sms(phone_number, message):
     """
-    Send SMS via your SMS provider
-    TODO: Implement with your chosen SMS service (Twilio, AWS SNS, etc.)
+    Send SMS via Firebase
     """
-    # For now, just log the OTP (replace with actual SMS service)
-    print(f"SMS to {phone_number}: {message}")
-    return True
+    try:
+        # Extract OTP from message for Firebase service
+        otp = message.split(": ")[1].split(".")[0] if ": " in message else "123456"
+        return firebase_sms_service.send_otp_sms(phone_number, otp)
+    except Exception as e:
+        print(f"Error sending SMS via Firebase: {e}")
+        return False
 
 @auth_bp.route('/send-otp', methods=['POST'])
 def send_otp():
@@ -132,12 +136,12 @@ def verify_otp():
 def complete_onboarding():
     """Complete onboarding for new users"""
     try:
-        # Verify session
+        # Verify session (updated for Firebase)
         phone_number = session.get('temp_phone_number')
-        otp_verified = session.get('otp_verified')
+        firebase_verified = session.get('firebase_verified')
         
-        if not phone_number or not otp_verified:
-            return jsonify({"error": "Invalid session. Please verify OTP again."}), 401
+        if not phone_number or not firebase_verified:
+            return jsonify({"error": "Invalid session. Please verify phone number again."}), 401
         
         # Check if user already exists (security check)
         existing_facilitator = facilitator_repo.get_facilitator_by_phone(phone_number)
@@ -171,7 +175,7 @@ def complete_onboarding():
         if facilitator:
             # Clear temporary session
             session.pop('temp_phone_number', None)
-            session.pop('otp_verified', None)
+            session.pop('firebase_verified', None)
             session.pop('verification_timestamp', None)
             
             # Set authenticated session
@@ -250,12 +254,68 @@ def session_status():
         print(f"Error in session_status: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
+@auth_bp.route('/firebase-verify', methods=['POST'])
+def firebase_verify():
+    """Verify Firebase token and handle user authentication"""
+    try:
+        data = request.get_json()
+        firebase_uid = data.get('firebase_uid')
+        phone_number = data.get('phone_number')
+        
+        if not firebase_uid or not phone_number:
+            return jsonify({"error": "Firebase UID and phone number are required"}), 400
+        
+        # Verify the Firebase token (optional, for extra security)
+        # You can verify the Firebase ID token here if you want
+        
+        # Check if user exists
+        facilitator = facilitator_repo.get_facilitator_by_phone(phone_number)
+        
+        if facilitator:
+            # Existing user - set session
+            session['facilitator_id'] = facilitator['id']
+            session['phone_number'] = phone_number
+            session['firebase_uid'] = firebase_uid
+            session['is_authenticated'] = True
+            session['login_timestamp'] = datetime.now().isoformat()
+            
+            return jsonify({
+                "success": True,
+                "is_new_user": False,
+                "redirect_to": "dashboard",
+                "facilitator": {
+                    "id": facilitator['id'],
+                    "phone_number": facilitator['phone_number'],
+                    "name": facilitator['name'],
+                    "email": facilitator['email']
+                },
+                "message": "Login successful"
+            }), 200
+        else:
+            # New user - set temporary session for onboarding
+            session['temp_phone_number'] = phone_number
+            session['firebase_uid'] = firebase_uid
+            session['firebase_verified'] = True
+            session['verification_timestamp'] = datetime.now().isoformat()
+            
+            return jsonify({
+                "success": True,
+                "is_new_user": True,
+                "redirect_to": "onboarding",
+                "message": "Phone verified. Please complete your profile."
+            }), 200
+            
+    except Exception as e:
+        print(f"Error in firebase_verify: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
 # CORS preflight handling
 @auth_bp.route('/send-otp', methods=['OPTIONS'])
 @auth_bp.route('/verify-otp', methods=['OPTIONS'])
 @auth_bp.route('/complete-onboarding', methods=['OPTIONS'])
 @auth_bp.route('/logout', methods=['OPTIONS'])
 @auth_bp.route('/session-status', methods=['OPTIONS'])
+@auth_bp.route('/firebase-verify', methods=['OPTIONS'])
 def handle_options():
     """Handle CORS preflight requests"""
     response = jsonify({})

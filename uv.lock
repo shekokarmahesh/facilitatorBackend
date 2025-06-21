@@ -166,6 +166,7 @@ dependencies = [
     { name = "psycopg2" },
     { name = "pyjwt" },
     { name = "python-dotenv" },
+    { name = "requests" },
 ]
 
 [package.metadata]
@@ -176,6 +177,7 @@ requires-dist = [
     { name = "psycopg2", specifier = ">=2.9.6" },
     { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
+    { name = "requests", specifier = ">=2.32.4" },
 ]
 
 [[package]]

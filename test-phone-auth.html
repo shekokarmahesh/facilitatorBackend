@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Firebase Phone Auth Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .step {
+            margin: 20px 0;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .step.active {
+            border-color: #007bff;
+            background-color: #f8f9fa;
+        }
+        input {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .result {
+            margin: 15px 0;
+            padding: 15px;
+            border-radius: 5px;
+            white-space: pre-wrap;
+        }
+        .success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        #recaptcha-container {
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔥 Firebase Phone Authentication Test</h1>
+        
+        <!-- Step 1: Send OTP -->
+        <div class="step active" id="step1">
+            <h3>Step 1: Send OTP</h3>
+            <input type="tel" id="phoneInput" placeholder="+918767763794" value="+918767763794">
+            <button onclick="sendOTP()">Send OTP</button>
+            <div id="recaptcha-container"></div>
+        </div>
+
+        <!-- Step 2: Verify OTP -->
+        <div class="step" id="step2">
+            <h3>Step 2: Verify OTP</h3>
+            <input type="text" id="otpInput" placeholder="Enter 6-digit OTP" maxlength="6">
+            <button onclick="verifyOTP()" disabled id="verifyBtn">Verify OTP</button>
+        </div>
+
+        <!-- Step 3: Onboarding (if new user) -->
+        <div class="step" id="step3" style="display: none;">
+            <h3>Step 3: Complete Profile (New User)</h3>
+            <input type="text" id="nameInput" placeholder="Full Name">
+            <input type="email" id="emailInput" placeholder="Email Address">
+            <button onclick="completeOnboarding()">Complete Profile</button>
+        </div>
+
+        <!-- Results -->
+        <div id="results"></div>
+    </div>    <!-- Firebase SDK -->
+    <script type="module">
+        // Import Firebase modules directly
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js';
+        import { getAuth, RecaptchaVerifier, signInWithPhoneNumber } from 'https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js';
+        
+        // Firebase config
+        const firebaseConfig = {
+            apiKey: "AIzaSyAYplRKUjhW_9nB86L3eegoSED9cW_H1Oc",
+            authDomain: "ahoumcrm.firebaseapp.com",
+            projectId: "ahoumcrm",
+            storageBucket: "ahoumcrm.firebasestorage.app",
+            messagingSenderId: "1058052705430",
+            appId: "1:1058052705430:web:bf4d060dbbf8d1195b86b7",
+            measurementId: "G-355BSQSDQK"
+        };
+        
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        
+        // Global variables
+        let confirmationResult = null;
+        let recaptchaVerifier = null;
+            // Setup reCAPTCHA
+        function setupRecaptcha() {
+            if (!recaptchaVerifier) {
+                recaptchaVerifier = new RecaptchaVerifier('recaptcha-container', {
+                    'size': 'invisible',
+                    'callback': (response) => {
+                        console.log('reCAPTCHA solved');
+                    },
+                    'expired-callback': () => {
+                        console.log('reCAPTCHA expired');
+                    }
+                }, auth);
+            }
+            return recaptchaVerifier;
+        }
+        
+        // Check if phone number is a test number
+        function isTestNumber(phoneNumber) {
+            const testNumbers = ['+918767763794', '+1234567890'];
+            return testNumbers.includes(phoneNumber);
+        }
+        
+        // Send OTP function
+        window.sendOTP = async function() {
+            const phoneNumber = document.getElementById('phoneInput').value;
+            showResult('🔄 Sending OTP...', 'info');
+            
+            // Handle test numbers differently
+            if (isTestNumber(phoneNumber)) {
+                showResult('📱 Test number detected. Use OTP: 123456', 'info');
+                showResult('✅ Ready for verification with test OTP', 'success');
+                activateStep(2);
+                document.getElementById('verifyBtn').disabled = false;
+                
+                // Create mock confirmation result for test numbers
+                confirmationResult = {
+                    confirm: async (otp) => {
+                        if (otp === '123456') {
+                            return {
+                                user: {
+                                    uid: 'test_uid_' + Date.now(),
+                                    phoneNumber: phoneNumber
+                                }
+                            };
+                        } else {
+                            throw new Error('Invalid OTP. Use 123456 for test number.');
+                        }
+                    }
+                };
+                return;
+            }
+            
+            try {
+                // Setup reCAPTCHA for real numbers
+                const appVerifier = setupRecaptcha();
+                
+                console.log(`🔥 Sending OTP to ${phoneNumber}...`);
+                
+                // Send OTP via Firebase
+                confirmationResult = await signInWithPhoneNumber(auth, phoneNumber, appVerifier);
+                
+                console.log('✅ OTP sent successfully!');
+                showResult('✅ OTP sent to your phone!\nCheck your SMS messages.', 'success');
+                activateStep(2);
+                document.getElementById('verifyBtn').disabled = false;
+                
+            } catch (error) {
+                console.error('❌ Error sending OTP:', error);
+                
+                if (error.code === 'auth/billing-not-enabled') {
+                    showResult('❌ Billing not enabled on Firebase.\n\nOptions:\n1. Enable billing in Firebase Console\n2. Use test number +918767763794 with OTP: 123456', 'error');
+                } else {
+                    showResult('❌ Failed to send OTP: ' + error.message, 'error');
+                }
+                
+                // Reset reCAPTCHA on error
+                if (recaptchaVerifier) {
+                    recaptchaVerifier.clear();
+                    recaptchaVerifier = null;
+                }
+            }
+        };
+        // Verify OTP function
+        window.verifyOTP = async function() {
+            const otp = document.getElementById('otpInput').value;
+            if (!otp || otp.length !== 6) {
+                showResult('❌ Please enter a valid 6-digit OTP', 'error');
+                return;
+            }
+            
+            if (!confirmationResult) {
+                showResult('❌ Please send OTP first', 'error');
+                return;
+            }
+            
+            showResult('🔄 Verifying OTP...', 'info');
+            
+            try {
+                console.log(`🔍 Verifying OTP: ${otp}...`);
+                
+                // Verify OTP with Firebase
+                const result = await confirmationResult.confirm(otp);
+                const user = result.user;
+                
+                console.log('✅ OTP verified successfully!');
+                console.log('Firebase User:', user);
+                
+                showResult('✅ OTP verified successfully!', 'success');
+                
+                // Call backend with Firebase user data
+                const backendResponse = await callBackendAuth(user);
+                
+                if (backendResponse.is_new_user) {
+                    showResult('🆕 New user detected. Please complete your profile.', 'info');
+                    activateStep(3);
+                    document.getElementById('step3').style.display = 'block';
+                } else {
+                    showResult('🎉 Login successful!\nWelcome back: ' + backendResponse.facilitator.name, 'success');
+                    showResult('Backend Response:\n' + JSON.stringify(backendResponse, null, 2), 'info');
+                }
+                
+            } catch (error) {
+                console.error('❌ Error verifying OTP:', error);
+                showResult('❌ OTP verification failed: ' + error.message, 'error');
+            }
+        };        
+        // Call backend with Firebase user data
+        async function callBackendAuth(firebaseUser) {
+            try {
+                const response = await fetch('http://localhost:5000/api/auth/firebase-verify', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    credentials: 'include', // Important for session cookies
+                    body: JSON.stringify({
+                        firebase_uid: firebaseUser.uid,
+                        phone_number: firebaseUser.phoneNumber
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                console.log('Backend response:', data);
+                
+                return data;
+            } catch (error) {
+                console.error('Backend call failed:', error);
+                throw error;
+            }
+        }
+        
+        // Complete onboarding function
+        window.completeOnboarding = async function() {
+            const name = document.getElementById('nameInput').value;
+            const email = document.getElementById('emailInput').value;
+            
+            if (!name || !email) {
+                showResult('❌ Please fill in all required fields', 'error');
+                return;
+            }
+            
+            showResult('🔄 Completing onboarding...', 'info');
+            
+            try {
+                const response = await fetch('http://localhost:5000/api/auth/complete-onboarding', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        name: name,
+                        email: email,
+                        basic_info: JSON.stringify({ signup_date: new Date().toISOString() }),
+                        professional_details: JSON.stringify({ role: 'Facilitator' })
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const result = await response.json();
+                
+                showResult('🎉 Profile created successfully!\nWelcome: ' + result.facilitator.name, 'success');
+                showResult('Complete Response:\n' + JSON.stringify(result, null, 2), 'info');
+                
+            } catch (error) {
+                showResult('❌ Onboarding failed: ' + error.message, 'error');
+            }
+        };        
+        // Helper functions
+        let currentStep = 1;
+        
+        function activateStep(stepNumber) {
+            // Remove active class from all steps
+            document.querySelectorAll('.step').forEach(step => {
+                step.classList.remove('active');
+            });
+            
+            // Add active class to current step
+            document.getElementById(`step${stepNumber}`).classList.add('active');
+            currentStep = stepNumber;
+        }
+        
+        function showResult(message, type) {
+            const resultsDiv = document.getElementById('results');
+            const resultElement = document.createElement('div');
+            resultElement.className = `result ${type}`;
+            resultElement.textContent = message;
+            resultsDiv.appendChild(resultElement);
+            
+            // Scroll to bottom
+            resultElement.scrollIntoView({ behavior: 'smooth' });
+        }
+        
+        console.log('🔥 Firebase Phone Auth Test Page Loaded');
+        console.log('Your phone number is pre-filled: +918767763794');
+        console.log('Click "Send OTP" to start testing!');
+    </script>
+</body>
+</html>
