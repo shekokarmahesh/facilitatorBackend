@@ -1,495 +1,525 @@
-from flask import Blueprint, jsonify, request
-from middleware.token_required import token_required
-from models.database import DatabaseManager
-import json
-from datetime import datetime, timezone
+from flask import Blueprint, request, jsonify
+from models.database import DatabaseManager, FacilitatorRepository
+from middleware.session_required import session_required
+import logging
 
-offerings_routes = Blueprint('offerings_routes', __name__)
+# Create blueprint
+offerings_bp = Blueprint('offerings', __name__)
+
+# Initialize database
 db_manager = DatabaseManager()
+facilitator_repo = FacilitatorRepository(db_manager)
 
-@offerings_routes.route('/api/offerings', methods=['GET'])
-@token_required
-def get_offerings():
-    """Get all offerings for the authenticated user"""
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ================================================================================
+# OFFERING MANAGEMENT ENDPOINTS (Alternative organization)
+# ================================================================================
+
+@offerings_bp.route('/', methods=['GET'])
+@session_required
+def list_offerings():
+    """List all offerings for the current facilitator with optional filtering"""
     try:
-        user_email = request.user_email
-        
-        # Get user info
-        db_manager.cursor.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-        user = db_manager.cursor.fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        user_id = user['id']
-        tenant_id = user['tenant_id']
+        facilitator_id = request.facilitator_id
         
         # Get query parameters for filtering
-        status = request.args.get('status')
-        offering_type = request.args.get('type')
-        page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 10))
+        category = request.args.get('category')
+        active_only = request.args.get('active', 'true').lower() == 'true'
         
-        # Build query
-        query = "SELECT * FROM offerings WHERE user_id = %s AND tenant_id = %s"
-        params = [user_id, tenant_id]
+        # Get all offerings for the facilitator
+        offerings = facilitator_repo.get_facilitator_offerings(facilitator_id)
         
-        if status:
-            query += " AND basic_info->>'status' = %s"
-            params.append(status)
+        # Apply filters
+        if category:
+            offerings = [o for o in offerings if o.get('category', '').lower() == category.lower()]
         
-        if offering_type:
-            query += " AND basic_info->>'type' = %s"
-            params.append(offering_type)
-        
-        query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
-        params.extend([limit, (page - 1) * limit])
-        
-        db_manager.cursor.execute(query, params)
-        offerings = db_manager.cursor.fetchall()
-        
-        # Format response
-        result = []
-        for offering in offerings:
-            result.append({
-                "id": offering['id'],
-                "user_id": offering['user_id'],
-                "tenant_id": offering['tenant_id'],
-                "basic_info": offering['basic_info'],
-                "details": offering['details'],
-                "price_schedule": offering['price_schedule'],
-                "created_at": offering['created_at'].isoformat(),
-                "updated_at": offering['updated_at'].isoformat()
-            })
-        
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@offerings_routes.route('/api/offerings', methods=['POST'])
-@token_required
-def create_offering():
-    """Create new offering"""
-    try:
-        data = request.json
-        user_email = request.user_email
-        
-        # Get user info
-        db_manager.cursor.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-        user = db_manager.cursor.fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        user_id = user['id']
-        tenant_id = user['tenant_id']
-        
-        # Create offering
-        db_manager.cursor.execute(
-            """
-            INSERT INTO offerings 
-            (tenant_id, user_id, basic_info, details, price_schedule, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            RETURNING id;
-            """,
-            (
-                tenant_id,
-                user_id,
-                json.dumps(data.get('basic_info', {})),
-                json.dumps(data.get('details', {})),
-                json.dumps(data.get('price_schedule', {}))
-            )
-        )
-        
-        offering_id = db_manager.cursor.fetchone()[0]
-        db_manager.connection.commit()
+        if not active_only:
+            # If active_only is False, we need to get inactive offerings too
+            # For now, the repository only returns active offerings
+            pass
         
         return jsonify({
-            "message": "Offering created successfully",
-            "offering_id": offering_id
-        }), 201
+            "success": True,
+            "offerings": offerings,
+            "count": len(offerings),
+            "filters": {
+                "category": category,
+                "active_only": active_only
+            }
+        }), 200
+        
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Error listing offerings: {e}")
+        return jsonify({
+            "error": "Server error",
+            "message": "Failed to list offerings"
+        }), 500
 
-@offerings_routes.route('/api/offerings/<int:offering_id>', methods=['GET'])
-@token_required
-def get_offering(offering_id):
-    """Get specific offering"""
+@offerings_bp.route('/', methods=['POST'])
+@session_required
+def create_new_offering():
+    """Create a new offering for the current facilitator"""
     try:
-        user_email = request.user_email
+        facilitator_id = request.facilitator_id
+        data = request.get_json()
         
-        # Get user info
-        db_manager.cursor.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-        user = db_manager.cursor.fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
+        if not data:
+            return jsonify({
+                "error": "No data provided",
+                "message": "Request body is required"
+            }), 400
         
-        user_id = user['id']
-        tenant_id = user['tenant_id']
+        # Validate required fields
+        required_fields = ['title']
+        missing_fields = [field for field in required_fields if not data.get(field)]
         
-        # Get offering
-        db_manager.cursor.execute(
-            "SELECT * FROM offerings WHERE id = %s AND user_id = %s AND tenant_id = %s",
-            (offering_id, user_id, tenant_id)
-        )
-        offering = db_manager.cursor.fetchone()
+        if missing_fields:
+            return jsonify({
+                "error": "Missing required fields",
+                "message": f"Required fields: {', '.join(missing_fields)}"
+            }), 400
+        
+        # Validate data types and constraints
+        if len(data.get('title', '')) > 255:
+            return jsonify({
+                "error": "Invalid data",
+                "message": "Title cannot exceed 255 characters"
+            }), 400
+        
+        # Prepare offering data
+        offering_data = {
+            "title": data.get("title").strip(),
+            "description": data.get("description", "").strip(),
+            "category": data.get("category", "").strip(),
+            "basic_info": data.get("basic_info"),
+            "details": data.get("details"),
+            "price_schedule": data.get("price_schedule")
+        }
+        
+        # Create the offering
+        offering_id = facilitator_repo.create_offering(facilitator_id, offering_data)
+        
+        if not offering_id:
+            return jsonify({
+                "error": "Creation failed",
+                "message": "Failed to create offering"
+            }), 500
+        
+        # Get the created offering details
+        offerings = facilitator_repo.get_facilitator_offerings(facilitator_id)
+        created_offering = next((o for o in offerings if o['id'] == offering_id), None)
+        
+        return jsonify({
+            "success": True,
+            "message": "Offering created successfully",
+            "offering": created_offering
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"Error creating offering: {e}")
+        return jsonify({
+            "error": "Server error",
+            "message": "Failed to create offering"
+        }), 500
+
+@offerings_bp.route('/<int:offering_id>', methods=['GET'])
+@session_required
+def get_offering_by_id(offering_id):
+    """Get a specific offering by ID (must belong to current facilitator)"""
+    try:
+        facilitator_id = request.facilitator_id
+        
+        # Verify ownership
+        if not facilitator_repo.verify_offering_ownership(facilitator_id, offering_id):
+            return jsonify({
+                "error": "Access denied",
+                "message": "You don't have permission to access this offering"
+            }), 403
+        
+        # Get offering details
+        offerings = facilitator_repo.get_facilitator_offerings(facilitator_id)
+        offering = next((o for o in offerings if o['id'] == offering_id), None)
         
         if not offering:
-            return jsonify({"error": "Offering not found"}), 404
+            return jsonify({
+                "error": "Offering not found",
+                "message": "Offering not found or inactive"
+            }), 404
         
         return jsonify({
-            "id": offering['id'],
-            "user_id": offering['user_id'],
-            "tenant_id": offering['tenant_id'],
-            "basic_info": offering['basic_info'],
-            "details": offering['details'],
-            "price_schedule": offering['price_schedule'],
-            "created_at": offering['created_at'].isoformat(),
-            "updated_at": offering['updated_at'].isoformat()
-        })
+            "success": True,
+            "offering": offering
+        }), 200
+        
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Error fetching offering: {e}")
+        return jsonify({
+            "error": "Server error",
+            "message": "Failed to fetch offering"
+        }), 500
 
-@offerings_routes.route('/api/offerings/<int:offering_id>', methods=['PUT'])
-@token_required
-def update_offering(offering_id):
-    """Update entire offering"""
+@offerings_bp.route('/<int:offering_id>', methods=['PUT'])
+@session_required
+def update_offering_by_id(offering_id):
+    """Update a specific offering by ID (must belong to current facilitator)"""
     try:
-        data = request.json
-        user_email = request.user_email
+        facilitator_id = request.facilitator_id
+        data = request.get_json()
         
-        # Get user info
-        db_manager.cursor.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-        user = db_manager.cursor.fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
+        if not data:
+            return jsonify({
+                "error": "No data provided",
+                "message": "Request body is required"
+            }), 400
         
-        user_id = user['id']
-        tenant_id = user['tenant_id']
+        # Verify ownership
+        if not facilitator_repo.verify_offering_ownership(facilitator_id, offering_id):
+            return jsonify({
+                "error": "Access denied",
+                "message": "You don't have permission to update this offering"
+            }), 403
         
-        # Update offering
-        db_manager.cursor.execute(
-            """
-            UPDATE offerings 
-            SET basic_info = %s, details = %s, price_schedule = %s, updated_at = CURRENT_TIMESTAMP
-            WHERE id = %s AND user_id = %s AND tenant_id = %s
-            """,
-            (
-                json.dumps(data.get('basic_info', {})),
-                json.dumps(data.get('details', {})),
-                json.dumps(data.get('price_schedule', {})),
-                offering_id,
-                user_id,
-                tenant_id
+        # Validate data constraints
+        if data.get('title') and len(data.get('title', '')) > 255:
+            return jsonify({
+                "error": "Invalid data",
+                "message": "Title cannot exceed 255 characters"
+            }), 400
+        
+        # Prepare update data (only include fields that are provided)
+        update_data = {}
+        updatable_fields = ['title', 'description', 'category', 'basic_info', 'details', 'price_schedule']
+        
+        for field in updatable_fields:
+            if field in data:
+                if field in ['title', 'description', 'category'] and data[field] is not None:
+                    update_data[field] = data[field].strip() if isinstance(data[field], str) else data[field]
+                else:
+                    update_data[field] = data[field]
+        
+        if not update_data:
+            return jsonify({
+                "error": "No valid fields to update",
+                "message": "No updatable fields provided"
+            }), 400
+        
+        # Update the offering
+        facilitator_repo.update_offering(offering_id, update_data)
+        
+        # Get updated offering
+        offerings = facilitator_repo.get_facilitator_offerings(facilitator_id)
+        updated_offering = next((o for o in offerings if o['id'] == offering_id), None)
+        
+        return jsonify({
+            "success": True,
+            "message": "Offering updated successfully",
+            "offering": updated_offering
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error updating offering: {e}")
+        return jsonify({
+            "error": "Server error",
+            "message": "Failed to update offering"
+        }), 500
+
+@offerings_bp.route('/<int:offering_id>', methods=['DELETE'])
+@session_required
+def delete_offering_by_id(offering_id):
+    """Soft delete a specific offering by ID (must belong to current facilitator)"""
+    try:
+        facilitator_id = request.facilitator_id
+        
+        # Verify ownership
+        if not facilitator_repo.verify_offering_ownership(facilitator_id, offering_id):
+            return jsonify({
+                "error": "Access denied",
+                "message": "You don't have permission to delete this offering"
+            }), 403
+        
+        # Check if offering exists and is active
+        offerings = facilitator_repo.get_facilitator_offerings(facilitator_id)
+        offering = next((o for o in offerings if o['id'] == offering_id), None)
+        
+        if not offering:
+            return jsonify({
+                "error": "Offering not found",
+                "message": "Offering not found or already inactive"
+            }), 404
+        
+        # Soft delete by setting is_active to False
+        # Note: We need to add this method to the repository or use a workaround
+        try:
+            # Prepare update data to deactivate
+            update_data = {"is_active": False}
+            facilitator_repo.update_offering(offering_id, update_data)
+            
+            return jsonify({
+                "success": True,
+                "message": "Offering deleted successfully"
+            }), 200
+            
+        except Exception:
+            # Fallback: Update with empty data but mark as inactive through direct DB access
+            db_manager.cursor.execute(
+                "UPDATE offerings SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (offering_id,)
             )
-        )
+            db_manager.connection.commit()
+            
+            return jsonify({
+                "success": True,
+                "message": "Offering deleted successfully"
+            }), 200
         
-        if db_manager.cursor.rowcount == 0:
-            return jsonify({"error": "Offering not found"}), 404
-        
-        db_manager.connection.commit()
-        
-        return jsonify({"message": "Offering updated successfully"})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Error deleting offering: {e}")
+        return jsonify({
+            "error": "Server error",
+            "message": "Failed to delete offering"
+        }), 500
 
-@offerings_routes.route('/api/offerings/<int:offering_id>', methods=['DELETE'])
-@token_required
-def delete_offering(offering_id):
-    """Delete offering"""
+@offerings_bp.route('/<int:offering_id>/activate', methods=['PUT'])
+@session_required
+def activate_offering(offering_id):
+    """Reactivate a previously deactivated offering"""
     try:
-        user_email = request.user_email
+        facilitator_id = request.facilitator_id
         
-        # Get user info
-        db_manager.cursor.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-        user = db_manager.cursor.fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        user_id = user['id']
-        tenant_id = user['tenant_id']
-        
-        # Delete offering
+        # Verify ownership (need to check even inactive offerings)
         db_manager.cursor.execute(
-            "DELETE FROM offerings WHERE id = %s AND user_id = %s AND tenant_id = %s",
-            (offering_id, user_id, tenant_id)
+            "SELECT 1 FROM offerings WHERE id = %s AND facilitator_id = %s",
+            (offering_id, facilitator_id)
         )
         
-        if db_manager.cursor.rowcount == 0:
-            return jsonify({"error": "Offering not found"}), 404
+        if not db_manager.cursor.fetchone():
+            return jsonify({
+                "error": "Access denied",
+                "message": "You don't have permission to access this offering"
+            }), 403
         
-        db_manager.connection.commit()
-        
-        return jsonify({"message": "Offering deleted successfully"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# Status management endpoints
-@offerings_routes.route('/api/offerings/<int:offering_id>/publish', methods=['PUT'])
-@token_required
-def publish_offering(offering_id):
-    """Publish offering"""
-    try:
-        user_email = request.user_email
-        
-        # Get user info
-        db_manager.cursor.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-        user = db_manager.cursor.fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        user_id = user['id']
-        tenant_id = user['tenant_id']
-        
-        # Update status to published
+        # Reactivate the offering
         db_manager.cursor.execute(
-            """
-            UPDATE offerings 
-            SET basic_info = jsonb_set(basic_info, '{status}', '"Published"', true),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = %s AND user_id = %s AND tenant_id = %s
-            """,
-            (offering_id, user_id, tenant_id)
+            "UPDATE offerings SET is_active = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (offering_id,)
         )
-        
-        if db_manager.cursor.rowcount == 0:
-            return jsonify({"error": "Offering not found"}), 404
-        
-        db_manager.connection.commit()
-        
-        return jsonify({"message": "Offering published successfully"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@offerings_routes.route('/api/offerings/<int:offering_id>/archive', methods=['PUT'])
-@token_required
-def archive_offering(offering_id):
-    """Archive offering"""
-    try:
-        user_email = request.user_email
-        
-        # Get user info
-        db_manager.cursor.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-        user = db_manager.cursor.fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        user_id = user['id']
-        tenant_id = user['tenant_id']
-        
-        # Update status to archived
-        db_manager.cursor.execute(
-            """
-            UPDATE offerings 
-            SET basic_info = jsonb_set(basic_info, '{status}', '"Archived"', true),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = %s AND user_id = %s AND tenant_id = %s
-            """,
-            (offering_id, user_id, tenant_id)
-        )
-        
-        if db_manager.cursor.rowcount == 0:
-            return jsonify({"error": "Offering not found"}), 404
-        
-        db_manager.connection.commit()
-        
-        return jsonify({"message": "Offering archived successfully"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@offerings_routes.route('/api/offerings/<int:offering_id>/draft', methods=['PUT'])
-@token_required
-def draft_offering(offering_id):
-    """Set offering to draft"""
-    try:
-        user_email = request.user_email
-        
-        # Get user info
-        db_manager.cursor.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-        user = db_manager.cursor.fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        user_id = user['id']
-        tenant_id = user['tenant_id']
-        
-        # Update status to draft
-        db_manager.cursor.execute(
-            """
-            UPDATE offerings 
-            SET basic_info = jsonb_set(basic_info, '{status}', '"Draft"', true),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = %s AND user_id = %s AND tenant_id = %s
-            """,
-            (offering_id, user_id, tenant_id)
-        )
-        
-        if db_manager.cursor.rowcount == 0:
-            return jsonify({"error": "Offering not found"}), 404
-        
-        db_manager.connection.commit()
-        
-        return jsonify({"message": "Offering set to draft successfully"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@offerings_routes.route('/api/offerings/duplicate/<int:offering_id>', methods=['POST'])
-@token_required
-def duplicate_offering(offering_id):
-    """Duplicate offering"""
-    try:
-        user_email = request.user_email
-        
-        # Get user info
-        db_manager.cursor.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-        user = db_manager.cursor.fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        user_id = user['id']
-        tenant_id = user['tenant_id']
-        
-        # Get original offering
-        db_manager.cursor.execute(
-            "SELECT * FROM offerings WHERE id = %s AND user_id = %s AND tenant_id = %s",
-            (offering_id, user_id, tenant_id)
-        )
-        original = db_manager.cursor.fetchone()
-        
-        if not original:
-            return jsonify({"error": "Offering not found"}), 404
-        
-        # Modify basic info to indicate copy
-        basic_info = original['basic_info']
-        if isinstance(basic_info, dict):
-            basic_info['title'] = f"Copy of {basic_info.get('title', 'Untitled')}"
-            basic_info['status'] = 'Draft'
-        
-        # Create duplicate
-        db_manager.cursor.execute(
-            """
-            INSERT INTO offerings 
-            (tenant_id, user_id, basic_info, details, price_schedule, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            RETURNING id;
-            """,
-            (
-                tenant_id,
-                user_id,
-                json.dumps(basic_info),
-                json.dumps(original['details']),
-                json.dumps(original['price_schedule'])
-            )
-        )
-        
-        new_offering_id = db_manager.cursor.fetchone()[0]
         db_manager.connection.commit()
         
         return jsonify({
-            "message": "Offering duplicated successfully",
-            "offering_id": new_offering_id
-        }), 201
+            "success": True,
+            "message": "Offering activated successfully"
+        }), 200
+        
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Error activating offering: {e}")
+        return jsonify({
+            "error": "Server error",
+            "message": "Failed to activate offering"
+        }), 500
 
-@offerings_routes.route('/api/offerings/search', methods=['GET'])
-@token_required
-def search_offerings():
-    """Search offerings"""
+# ================================================================================
+# OFFERING STATISTICS AND ANALYTICS
+# ================================================================================
+
+@offerings_bp.route('/stats', methods=['GET'])
+@session_required
+def get_offering_statistics():
+    """Get statistics about the facilitator's offerings"""
     try:
-        user_email = request.user_email
+        facilitator_id = request.facilitator_id
         
-        # Get user info
-        db_manager.cursor.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-        user = db_manager.cursor.fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
+        # Get all offerings (including inactive for stats)
+        db_manager.cursor.execute(
+            """
+            SELECT 
+                COUNT(*) as total_offerings,
+                COUNT(CASE WHEN is_active = TRUE THEN 1 END) as active_offerings,
+                COUNT(CASE WHEN is_active = FALSE THEN 1 END) as inactive_offerings,
+                COUNT(DISTINCT category) as unique_categories,
+                category,
+                COUNT(*) as category_count
+            FROM offerings 
+            WHERE facilitator_id = %s 
+            GROUP BY category
+            """,
+            (facilitator_id,)
+        )
         
-        user_id = user['id']
-        tenant_id = user['tenant_id']
+        category_stats = db_manager.cursor.fetchall()
         
-        # Get query parameters
-        query = request.args.get('q', '')
-        status = request.args.get('status')
-        offering_type = request.args.get('type')
-        page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 10))
+        # Get overall stats
+        db_manager.cursor.execute(
+            """
+            SELECT 
+                COUNT(*) as total_offerings,
+                COUNT(CASE WHEN is_active = TRUE THEN 1 END) as active_offerings,
+                COUNT(CASE WHEN is_active = FALSE THEN 1 END) as inactive_offerings,
+                COUNT(DISTINCT category) as unique_categories
+            FROM offerings 
+            WHERE facilitator_id = %s
+            """,
+            (facilitator_id,)
+        )
         
-        # Build search query
-        sql_query = """
-            SELECT * FROM offerings 
-            WHERE user_id = %s AND tenant_id = %s
-        """
-        params = [user_id, tenant_id]
+        overall_stats = db_manager.cursor.fetchone()
         
-        if query:
-            sql_query += " AND (basic_info->>'title' ILIKE %s OR basic_info->>'description' ILIKE %s)"
-            params.extend([f'%{query}%', f'%{query}%'])
+        # Format category breakdown
+        categories = []
+        for row in category_stats:
+            if row['category']:  # Skip null categories
+                categories.append({
+                    "category": row['category'],
+                    "count": row['category_count']
+                })
         
-        if status:
-            sql_query += " AND basic_info->>'status' = %s"
-            params.append(status)
+        stats = {
+            "overall": {
+                "total_offerings": overall_stats['total_offerings'],
+                "active_offerings": overall_stats['active_offerings'],
+                "inactive_offerings": overall_stats['inactive_offerings'],
+                "unique_categories": overall_stats['unique_categories']
+            },
+            "categories": categories
+        }
         
-        if offering_type:
-            sql_query += " AND basic_info->>'type' = %s"
-            params.append(offering_type)
+        return jsonify({
+            "success": True,
+            "statistics": stats
+        }), 200
         
-        sql_query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
-        params.extend([limit, (page - 1) * limit])
-        
-        db_manager.cursor.execute(sql_query, params)
-        offerings = db_manager.cursor.fetchall()
-        
-        # Format response
-        result = []
-        for offering in offerings:
-            result.append({
-                "id": offering['id'],
-                "user_id": offering['user_id'],
-                "tenant_id": offering['tenant_id'],
-                "basic_info": offering['basic_info'],
-                "details": offering['details'],
-                "price_schedule": offering['price_schedule'],
-                "created_at": offering['created_at'].isoformat(),
-                "updated_at": offering['updated_at'].isoformat()
-            })
-        
-        return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Error fetching offering statistics: {e}")
+        return jsonify({
+            "error": "Server error",
+            "message": "Failed to fetch offering statistics"
+        }), 500
 
-@offerings_routes.route('/api/offerings/categories', methods=['GET'])
-@token_required
-def get_categories():
-    """Get available categories"""
-    categories = [
-        "Yoga",
-        "Meditation",
-        "Breathwork",
-        "Fitness",
-        "Wellness",
-        "Mindfulness",
-        "Spiritual",
-        "Workshop",
-        "Retreat",
-        "Training"
-    ]
-    return jsonify(categories)
+# ================================================================================
+# BULK OPERATIONS
+# ================================================================================
 
-@offerings_routes.route('/api/offerings/tags', methods=['GET'])
-@token_required
-def get_tags():
-    """Get available tags"""
-    tags = [
-        "Beginner Friendly",
-        "Advanced",
-        "Online",
-        "Offline",
-        "Group Session",
-        "Individual",
-        "Morning",
-        "Evening",
-        "Weekend",
-        "Intensive",
-        "Certification",
-        "Holistic Health"
-    ]
-    return jsonify(tags)
+@offerings_bp.route('/bulk/update', methods=['PUT'])
+@session_required
+def bulk_update_offerings():
+    """Update multiple offerings at once"""
+    try:
+        facilitator_id = request.facilitator_id
+        data = request.get_json()
+        
+        if not data or 'offerings' not in data:
+            return jsonify({
+                "error": "Invalid data",
+                "message": "Array of offerings with IDs is required"
+            }), 400
+        
+        offerings_to_update = data['offerings']
+        
+        if not isinstance(offerings_to_update, list):
+            return jsonify({
+                "error": "Invalid data",
+                "message": "Offerings must be an array"
+            }), 400
+        
+        updated_count = 0
+        errors = []
+        
+        for offering_data in offerings_to_update:
+            if 'id' not in offering_data:
+                errors.append("Missing ID for offering")
+                continue
+            
+            offering_id = offering_data['id']
+            
+            # Verify ownership
+            if not facilitator_repo.verify_offering_ownership(facilitator_id, offering_id):
+                errors.append(f"Access denied for offering ID {offering_id}")
+                continue
+            
+            # Prepare update data
+            update_data = {}
+            updatable_fields = ['title', 'description', 'category', 'basic_info', 'details', 'price_schedule']
+            
+            for field in updatable_fields:
+                if field in offering_data:
+                    update_data[field] = offering_data[field]
+            
+            if update_data:
+                try:
+                    facilitator_repo.update_offering(offering_id, update_data)
+                    updated_count += 1
+                except Exception as e:
+                    errors.append(f"Failed to update offering ID {offering_id}: {str(e)}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Bulk update completed. Updated {updated_count} offerings.",
+            "updated_count": updated_count,
+            "errors": errors
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in bulk update: {e}")
+        return jsonify({
+            "error": "Server error",
+            "message": "Failed to perform bulk update"
+        }), 500
+
+@offerings_bp.route('/bulk/delete', methods=['DELETE'])
+@session_required
+def bulk_delete_offerings():
+    """Soft delete multiple offerings at once"""
+    try:
+        facilitator_id = request.facilitator_id
+        data = request.get_json()
+        
+        if not data or 'offering_ids' not in data:
+            return jsonify({
+                "error": "Invalid data",
+                "message": "Array of offering IDs is required"
+            }), 400
+        
+        offering_ids = data['offering_ids']
+        
+        if not isinstance(offering_ids, list):
+            return jsonify({
+                "error": "Invalid data",
+                "message": "offering_ids must be an array"
+            }), 400
+        
+        deleted_count = 0
+        errors = []
+        
+        for offering_id in offering_ids:
+            # Verify ownership
+            if not facilitator_repo.verify_offering_ownership(facilitator_id, offering_id):
+                errors.append(f"Access denied for offering ID {offering_id}")
+                continue
+            
+            try:
+                # Soft delete
+                db_manager.cursor.execute(
+                    "UPDATE offerings SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    (offering_id,)
+                )
+                deleted_count += 1
+            except Exception as e:
+                errors.append(f"Failed to delete offering ID {offering_id}: {str(e)}")
+        
+        db_manager.connection.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": f"Bulk delete completed. Deleted {deleted_count} offerings.",
+            "deleted_count": deleted_count,
+            "errors": errors
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in bulk delete: {e}")
+        return jsonify({
+            "error": "Server error",
+            "message": "Failed to perform bulk delete"
+        }), 500
